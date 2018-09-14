@@ -12,8 +12,8 @@ from dartdb import DartDb
 
 header_api = {
     'accept': 'application/json',
-    'X-Naver-Client-Id': 'aNf8wmhx9JDXDGEwqihl',
-    'X-Naver-Client-Secret': 'zWTwoDIiLI'
+    'X-Naver-Client-Id': '',
+    'X-Naver-Client-Secret': ''
 }
 
 major_urls = {
