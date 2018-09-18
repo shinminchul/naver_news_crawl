@@ -3,10 +3,13 @@
 import re
 import html
 import pymysql
+import logging
 import requests
+import configparser
 from tqdm import tqdm
 from time import sleep
 from bs4 import BeautifulSoup
+from openpyxl import load_workbook
 
 from dartdb import DartDb
 
@@ -24,6 +27,18 @@ major_urls = {
     'junja': 'etnews.com',
     'hangook': 'hankookilbo.com'
 }
+company_list = list()
+
+
+# 기업명 로딩
+def load_targets(filename):
+    # Get company data
+    company_file = load_workbook('./setting/{}'.format(filename))
+    company_sheet = company_file.worksheets[0]
+    for row in company_sheet.rows:
+        if row[0].value:
+            company_list.append(row[0].value.replace(u'\xa0', u' ').strip())
+    company_list.pop(0)
 
 
 # naver api 사용해서 데이터 가져오기.
@@ -33,8 +48,11 @@ def get_json(keyword, display=100, start=1):
     if req.status_code == 200:
         return req.json()
     else:
-        print(req.text)
-        raise Exception('Error on calling Naver API : request code {}'.format(req.status_code))
+        req = requests.get(url, headers=header_api, allow_redirects=False)
+        if req.status_code == 200:
+            return req.json()
+        else:
+            raise Exception('Error on calling Naver API : request code {}'.format(req.status_code))
 
 
 # 네이버 기사 내용 수집.
@@ -120,38 +138,40 @@ def main(keyword, **kwargs):
 
     cnt = 0
     temp_list = list()
-    status = True
     for i in range(reqs + 1):
         start = i * 100 + 1
-        if not status:
-            break
-        for item in tqdm(get_json(keyword, start=start)['items'], desc='{} 수집 {}/{}'.format(keyword, i, reqs)):
-            if cnt > kwargs['count']:
-                status = kwargs['func'](temp_list)
-                if not status:
-                    break
-                temp_list.clear()
-                cnt = 0
-            if '//news.naver.com' in item['link']:
-                content = get_content_naver(item['link'])
-                temp_list.append(make_dict(item, keyword, content))
-                cnt += 1
-            elif major_urls['thebell'] in item['link']:
-                content = get_content_thebell(item['link'])
-                temp_list.append(make_dict(item, keyword, content))
-                cnt += 1
+        for item in tqdm(get_json(keyword, start=start)['items'], desc='{} ({}/{}) 수집 중 ({}/{})'.format(keyword, kwargs['now'], kwargs['length'], i, reqs), leave=False):
+            try:
+                if cnt > kwargs['count']:
+                    status = kwargs['func'](temp_list)
+                    if not status:
+                        return
+                    temp_list.clear()
+                    cnt = 0
+                if '//news.naver.com' in item['link']:
+                    content = get_content_naver(item['link'])
+                    temp_list.append(make_dict(item, keyword, content))
+                    cnt += 1
+                elif major_urls['thebell'] in item['link']:
+                    content = get_content_thebell(item['link'])
+                    temp_list.append(make_dict(item, keyword, content))
+                    cnt += 1
+            except Exception as exc:
+                logger.info('[ERROR] 수집 에러. ' + str(exc))
+        if len(temp_list) > 0:
+            kwargs['func'](temp_list)
+            temp_list.clear()
 
 
 def data_sql(data):
     dart.get_cursor()
     for iter in data:
-        sql = 'INSERT INTO `naver_news` VALUES("{}", "{}", "{}", "{}", "{}", "{}", "{}");' \
-            .format(iter['id'], iter['title'], iter['keyword'], iter['link'], iter['originallink'], iter['content'], iter['date'])
+        sql = 'INSERT INTO `{}` VALUES("{}", "{}", "{}", "{}", "{}", "{}", "{}");' \
+            .format(table_name, iter['id'], iter['title'], iter['keyword'], iter['link'], iter['originallink'], iter['content'], iter['date'])
         try:
             dart.curs.execute(sql)
         except pymysql.err.IntegrityError as exc:
             if '1062' in str(exc):
-                print(sql)
                 return False
         except Exception as exc:
             pass
@@ -159,7 +179,35 @@ def data_sql(data):
     return True
 
 
-dart = DartDb()
-#dart._debug_clear_table('naver_news')
-main('LG전자', count=50, func=data_sql)
-dart.get_cursor()
+if __name__ == "__main__":
+    # LOGGER
+    logger = logging.getLogger('notice')
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('[SYSTEM] %(asctime)s :: %(message)s')
+    streamHandler = logging.StreamHandler()
+    streamHandler.setFormatter(formatter)
+    logger.addHandler(streamHandler)
+
+    # setting
+    config = configparser.ConfigParser()
+    config.read('./setting/news_config.ini')
+    header_api['X-Naver-Client-Id'] = config['API']['X_NAVER_CLIENT_ID']
+    header_api['X-Naver-Client-Secret'] = config['API']['X_NAVER_CLIENT_SECRET']
+    file_name = config['COMPANY']['FILE_NAME']
+    db_header = {
+        'host': config['DATABASE']['HOST'],
+        'port': int(config['DATABASE']['PORT']),
+        'user': config['DATABASE']['USERNAME'],
+        'password': config['DATABASE']['PASSWORD'],
+        'db': config['DATABASE']['SCHEMA'],
+        'charset': config['DATABASE']['CHARSET']
+    }
+    table_name = config['DATABASE']['TABLE_NAME']
+
+    load_targets(file_name)
+
+    dart = DartDb(db_header)
+    idx = 1
+    for company in company_list:
+        main(company, count=30, func=data_sql, now=idx, length=len(company_list))
+        idx += 1
