@@ -1,7 +1,8 @@
-#-*-encoding:utf=8-*-
+#-*-encoding:utf-8-*-
 
 import re
 import html
+import json
 import pymysql
 import logging
 import requests
@@ -42,16 +43,24 @@ def load_targets(filename):
 
 
 # naver api 사용해서 데이터 가져오기.
-def get_json(keyword, display=100, start=1):
+def get_json(keyword, display=100, start=1, depth=1):
     url = 'https://openapi.naver.com/v1/search/news.json?query={0}&display={1}&start={2}&sort=date'.format(keyword, str(display), str(start))
     req = requests.get(url, headers=header_api, allow_redirects=False)
+
     if req.status_code == 200:
-        return req.json()
+        try:
+            json_data = req.json()
+            return json_data
+        except json.decoder.JSONDecodeError:
+            if depth > 10:
+                return {'items': list()}
+            return get_json(keyword, display, start, depth + 1)
     else:
-        req = requests.get(url, headers=header_api, allow_redirects=False)
-        if req.status_code == 200:
-            return req.json()
-        else:
+        try:
+            if depth > 10:
+                raise Exception('Error on calling Naver API : request code {}'.format(req.status_code))
+            return get_json(keyword, display, start, depth + 1)
+        except Exception:
             raise Exception('Error on calling Naver API : request code {}'.format(req.status_code))
 
 
@@ -140,7 +149,7 @@ def main(keyword, **kwargs):
     temp_list = list()
     for i in range(reqs + 1):
         start = i * 100 + 1
-        for item in tqdm(get_json(keyword, start=start)['items'], desc='{} ({}/{}) 수집 중 ({}/{})'.format(keyword, kwargs['now'], kwargs['length'], i, reqs), leave=False):
+        for item in tqdm(get_json(keyword, start=start)['items'], desc='\'{}\' 상세 수집 ({}/{})'.format(keyword, i, reqs), ncols=100, leave=False):
             try:
                 if cnt > kwargs['count']:
                     status = kwargs['func'](temp_list)
@@ -208,6 +217,6 @@ if __name__ == "__main__":
 
     dart = DartDb(db_header)
     idx = 1
-    for company in company_list:
+    for company in tqdm(company_list, ncols=100, leave=True, desc='전체 수집'):
         main(company, count=30, func=data_sql, now=idx, length=len(company_list))
         idx += 1
